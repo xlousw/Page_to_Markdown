@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Page to Markdown",
+  "version": "1.3.0",
+  "description": "将当前标签页的可见内容保存为 Markdown，不进行任何爬取。",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "downloads",
+    "clipboardWrite",
+    "storage",
+    "contextMenus",
+    "notifications"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "保存当前页面为 Markdown",
+    "default_popup": "popup.html"
+  },
+  "commands": {
+    "save-page": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+M",
+        "mac": "Command+Shift+M"
+      },
+      "description": "保存当前页面为 Markdown"
+    },
+    "copy-page": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "Command+Shift+Y"
+      },
+      "description": "复制当前页面 Markdown 到剪贴板"
+    }
+  }
+}

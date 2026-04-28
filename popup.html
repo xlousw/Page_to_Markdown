@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Page to Markdown</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <header>
+        <h1>页面转 Markdown</h1>
+        <p>仅读取当前标签页已渲染的内容，不进行任何爬取。</p>
+      </header>
+
+      <section class="options" aria-label="导出选项">
+        <label class="option">
+          <input id="includeLinks" type="checkbox" checked />
+          <span>保留链接</span>
+        </label>
+        <label class="option">
+          <input id="includeImages" type="checkbox" checked />
+          <span>保留图片</span>
+        </label>
+        <label class="option">
+          <input id="useSelection" type="checkbox" />
+          <span>仅保存选中内容</span>
+        </label>
+        <label class="option">
+          <input id="frontMatter" type="checkbox" />
+          <span>添加 YAML Front Matter</span>
+        </label>
+        <label class="option">
+          <input id="appendDate" type="checkbox" />
+          <span>文件名附加日期</span>
+        </label>
+      </section>
+
+      <section class="filename" aria-label="文件名模板">
+        <label for="filenameTemplate">文件名模板</label>
+        <input
+          id="filenameTemplate"
+          type="text"
+          spellcheck="false"
+          placeholder="{title}"
+          value="{title}"
+        />
+        <small>可用占位符：<code>{title}</code>、<code>{host}</code>、<code>{date}</code></small>
+      </section>
+
+      <div class="actions">
+        <button id="previewButton" type="button">预览</button>
+        <button id="copyButton" type="button">复制</button>
+        <button id="saveButton" type="button" class="primary">下载 Markdown</button>
+      </div>
+
+      <section id="previewSection" class="preview hidden" aria-label="Markdown 预览">
+        <div class="preview-head">
+          <span id="previewMeta"></span>
+          <button id="previewClose" type="button" class="link">收起</button>
+        </div>
+        <textarea id="previewArea" spellcheck="false"></textarea>
+        <p class="preview-tip">可以直接在此处修改，修改会应用于接下来的「复制」和「下载」。</p>
+      </section>
+
+      <p id="status" role="status"></p>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
