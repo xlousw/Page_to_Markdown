@@ -10,11 +10,12 @@ const includeImages = document.querySelector("#includeImages");
 const useSelection = document.querySelector("#useSelection");
 const frontMatter = document.querySelector("#frontMatter");
 const appendDate = document.querySelector("#appendDate");
+const downloadImages = document.querySelector("#downloadImages");
 const filenameTemplate = document.querySelector("#filenameTemplate");
 const statusNode = document.querySelector("#status");
 
 const STORAGE_KEY = "pageToMarkdownOptions";
-const OPTION_NODES = [includeLinks, includeImages, useSelection, frontMatter, appendDate];
+const OPTION_NODES = [includeLinks, includeImages, useSelection, frontMatter, appendDate, downloadImages];
 
 let lastResult = null; // { title, source, markdown }
 
@@ -59,6 +60,7 @@ async function loadOptions() {
     if (typeof saved.useSelection === "boolean") useSelection.checked = saved.useSelection;
     if (typeof saved.frontMatter === "boolean") frontMatter.checked = saved.frontMatter;
     if (typeof saved.appendDate === "boolean") appendDate.checked = saved.appendDate;
+    if (typeof saved.downloadImages === "boolean") downloadImages.checked = saved.downloadImages;
     if (typeof saved.filenameTemplate === "string" && saved.filenameTemplate.trim()) {
       filenameTemplate.value = saved.filenameTemplate;
     }
@@ -76,6 +78,7 @@ async function persistOptions() {
         useSelection: useSelection.checked,
         frontMatter: frontMatter.checked,
         appendDate: appendDate.checked,
+        downloadImages: downloadImages.checked,
         filenameTemplate: filenameTemplate.value.trim() || "{title}"
       }
     });
@@ -272,22 +275,48 @@ async function saveMarkdown() {
 
   try {
     const result = await ensureResult();
-    const markdown = currentMarkdown();
+    let markdown = currentMarkdown();
     if (!markdown.trim()) throw new Error("内容为空，无法保存");
+
+    // 如果需要下载图片，先探测默认下载目录（在打开保存对话框之前）
+    let downloadsDir = "";
+    const shouldDownloadImages = downloadImages.checked && result.images && result.images.length > 0;
+    if (shouldDownloadImages) {
+      setStatus("准备中…");
+      downloadsDir = await getDownloadsDirectory();
+      // 替换 Markdown 中的远程图片 URL 为本地相对路径
+      markdown = replaceImageUrls(markdown, result.images, result.title);
+    }
+
+    // 将远程超链接替换为本地相对路径
+    markdown = replaceHyperlinks(markdown);
 
     const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const filename = buildFilename(result.title, result.source);
 
-    await chrome.downloads.download({
+    setStatus("等待选择保存位置…");
+    const mdDownloadId = await chrome.downloads.download({
       url,
       filename,
       saveAs: true,
       conflictAction: "uniquify"
     });
 
-    setStatus(`已保存 ${filename}`);
+    // 等待用户选择保存路径并完成下载
+    await waitForDownloadComplete(mdDownloadId);
     setTimeout(() => URL.revokeObjectURL(url), 10000);
+
+    // 获取 MD 文件的实际保存路径
+    const [mdItem] = await chrome.downloads.search({ id: mdDownloadId });
+    const mdAbsPath = mdItem?.filename || "";
+    setStatus(`已保存 ${filename}`);
+
+    // 下载图片到同一目录下的 images/ 子文件夹
+    if (shouldDownloadImages && mdAbsPath) {
+      const relativeBase = getRelativeBase(mdAbsPath, downloadsDir);
+      await downloadAllImages(result.images, result.title, relativeBase);
+    }
   } catch (error) {
     setStatus(error?.message || "保存失败");
   } finally {
@@ -336,3 +365,179 @@ saveButton.addEventListener("click", saveMarkdown);
 copyButton.addEventListener("click", copyMarkdown);
 
 loadOptions();
+
+// ===== 下载等待与路径计算工具 =====
+
+/**
+ * 等待指定下载完成（用户确认保存对话框后）
+ */
+function waitForDownloadComplete(downloadId) {
+  return new Promise((resolve, reject) => {
+    // 监听状态变化（先注册监听，避免竞态）
+    const listener = (delta) => {
+      if (delta.id !== downloadId) return;
+      if (delta.state) {
+        if (delta.state.current === "complete") {
+          chrome.downloads.onChanged.removeListener(listener);
+          resolve();
+        } else if (delta.state.current === "interrupted") {
+          chrome.downloads.onChanged.removeListener(listener);
+          reject(new Error("下载已取消"));
+        }
+      }
+    };
+    chrome.downloads.onChanged.addListener(listener);
+
+    // 再检查是否已经完成（防止在注册监听前就完成的情况）
+    chrome.downloads.search({ id: downloadId }).then(items => {
+      if (items && items.length > 0) {
+        if (items[0].state === "complete") {
+          chrome.downloads.onChanged.removeListener(listener);
+          resolve();
+        } else if (items[0].state === "interrupted") {
+          chrome.downloads.onChanged.removeListener(listener);
+          reject(new Error("下载已取消"));
+        }
+      }
+    });
+  });
+}
+
+/**
+ * 通过探测文件确定浏览器默认下载目录的绝对路径
+ */
+async function getDownloadsDirectory() {
+  let downloadsDir = "";
+  try {
+    const probeId = await chrome.downloads.download({
+      url: "data:text/plain;charset=utf-8,.",
+      filename: ".p2m_probe",
+      saveAs: false,
+      conflictAction: "overwrite"
+    });
+    await waitForDownloadComplete(probeId);
+    const [probeItem] = await chrome.downloads.search({ id: probeId });
+    const absPath = probeItem?.filename || "";
+    // 提取目录部分（支持 / 和 \ 路径分隔符）
+    const sep = absPath.includes("\\") ? "\\" : "/";
+    const lastSepIdx = absPath.lastIndexOf(sep);
+    downloadsDir = lastSepIdx > 0 ? absPath.substring(0, lastSepIdx) : "";
+    // 清理探测文件（从磁盘和下载记录中都删除）
+    try { await chrome.downloads.removeFile(probeId); } catch {}
+    try { await chrome.downloads.erase({ id: probeId }); } catch {}
+  } catch {
+    // 探测失败，回退到空字符串（图片将保存到默认下载目录/images/）
+  }
+  return downloadsDir;
+}
+
+/**
+ * 根据 MD 绝对路径和已知的下载目录，计算相对子路径
+ * 例如：
+ *   downloadsDir = "/Users/x/Downloads"
+ *   mdAbsPath    = "/Users/x/Downloads/Redis/article.md"
+ *   返回 "Redis"
+ */
+function getRelativeBase(mdAbsPath, downloadsDir) {
+  if (!mdAbsPath || !downloadsDir) return "";
+  // 提取 MD 文件所在目录
+  const sep = mdAbsPath.includes("\\") ? "\\" : "/";
+  const lastSepIdx = mdAbsPath.lastIndexOf(sep);
+  const mdDir = lastSepIdx > 0 ? mdAbsPath.substring(0, lastSepIdx) : "";
+  // MD 直接保存在下载目录根下
+  if (mdDir === downloadsDir) return "";
+  // MD 保存在下载目录的子文件夹中
+  if (mdDir.startsWith(downloadsDir + sep)) {
+    return mdDir.substring(downloadsDir.length + 1);
+  }
+  // MD 保存在下载目录外（无法计算相对路径）
+  return "";
+}
+
+// ===== 图片下载功能 =====
+
+function getImageExtension(url) {
+  try {
+    const pathname = new URL(url).pathname;
+    const match = pathname.match(/\.([a-z0-9]+)$/i);
+    if (match) {
+      const ext = match[1].toLowerCase();
+      if (["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "avif"].includes(ext)) {
+        return ext;
+      }
+    }
+  } catch {}
+  return "png";
+}
+
+/**
+ * 将 Markdown 中的远程图片 URL 替换为本地相对路径
+ * ![alt](https://remote.com/img.png) → ![alt](./images/标题_1.png)
+ */
+function replaceImageUrls(markdown, images, title) {
+  if (!images || images.length === 0) return markdown;
+  const baseTitle = sanitizeFilename(title || "page");
+  let result = markdown;
+  for (let i = 0; i < images.length; i++) {
+    const imageUrl = images[i];
+    const ext = getImageExtension(imageUrl);
+    const localPath = `./images/${baseTitle}_${i + 1}.${ext}`;
+    // 替换 Markdown 图片语法中的 URL（处理 URL 中可能的特殊字符）
+    const escapedUrl = imageUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`(!\\[[^\\]]*\\])\\(${escapedUrl}\\)`, "g");
+    result = result.replace(pattern, `$1(${localPath})`);
+  }
+  return result;
+}
+
+/**
+ * 将 Markdown 中的远程超链接替换为本地相对路径
+ * [标题](https://example.com/page) → [标题](./标题)
+ */
+function replaceHyperlinks(markdown) {
+  // 匹配非图片的 Markdown 链接：[text](http...)
+  // 使用否定前瞻确保不匹配 ![alt](url)
+  return markdown.replace(/(?<!!)\[([^\]]+)\]\(https?:\/\/[^)]+\)/g, (match, linkText) => {
+    const cleanText = linkText.trim();
+    return `[${cleanText}](./${cleanText})`;
+  });
+}
+
+/**
+ * 下载所有图片到指定相对路径下的 images/ 子文件夹
+ * @param {string[]} images - 图片 URL 列表
+ * @param {string} title - 文档标题（用于命名）
+ * @param {string} relativeBase - 相对于下载目录的子路径（如 "notes/sub"）
+ */
+async function downloadAllImages(images, title, relativeBase = "") {
+  const baseTitle = sanitizeFilename(title || "page");
+  let successCount = 0;
+  let failCount = 0;
+
+  for (let i = 0; i < images.length; i++) {
+    const imageUrl = images[i];
+    const ext = getImageExtension(imageUrl);
+    const imgName = `${baseTitle}_${i + 1}.${ext}`;
+    const filename = relativeBase
+      ? `${relativeBase}/images/${imgName}`
+      : `images/${imgName}`;
+
+    try {
+      await chrome.downloads.download({
+        url: imageUrl,
+        filename: filename,
+        saveAs: false,
+        conflictAction: "uniquify"
+      });
+      successCount++;
+    } catch {
+      failCount++;
+    }
+  }
+
+  if (failCount > 0) {
+    setStatus(`图片下载完成：成功 ${successCount} 张，失败 ${failCount} 张`);
+  } else {
+    setStatus(`已保存 Markdown 及 ${successCount} 张图片`);
+  }
+}

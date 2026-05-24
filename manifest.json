@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Page to Markdown",
-  "version": "1.3.0",
+  "version": "1.5.0",
   "description": "将当前标签页的可见内容保存为 Markdown，不进行任何爬取。",
   "permissions": [
     "activeTab",
@@ -11,6 +11,9 @@
     "storage",
     "contextMenus",
     "notifications"
+  ],
+  "host_permissions": [
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js"

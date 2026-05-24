@@ -1,6 +1,9 @@
 (() => {
   const OPTIONS = (typeof window !== "undefined" && window.__pageToMarkdownOptions) || {};
 
+  // 收集页面中所有有效内容图片 URL
+  const __collectedImages = [];
+
   const SKIP_TAGS = new Set([
     "BUTTON",
     "CANVAS",
@@ -143,7 +146,18 @@
   function absoluteUrl(value) {
     if (!value) return "";
     try {
-      return new URL(value, location.href).href;
+      const full = new URL(value, location.href).href;
+      // 处理代理图片 URL（如语雀 /api/filetransfer/images?url=实际URL）
+      // 提取 url 参数中的真实图片地址
+      try {
+        const parsed = new URL(full);
+        if (parsed.pathname.includes('/api/filetransfer/images') || 
+            parsed.pathname.includes('/api/image')) {
+          const realUrl = parsed.searchParams.get('url');
+          if (realUrl && /^https?:\/\//i.test(realUrl)) return realUrl;
+        }
+      } catch {}
+      return full;
     } catch {
       return value;
     }
@@ -438,6 +452,10 @@
       // 跳过文档卡片的装饰图片（背景图和图标图）
       if (/ne-yuque-doc-(card-view-bg|icon)/i.test(imgClass)) return "";
       
+      // 收集图片 URL
+      if (!__collectedImages.includes(src)) {
+        __collectedImages.push(src);
+      }
       return `![${alt}](${src})`;
     }
 
@@ -1127,7 +1145,12 @@
         const caption = figcaption ? cleanInline(inlineChildren(figcaption, state)) : "";
         const alt = img.tagName === "IMG" ? escapeInline(img.getAttribute("alt") || "") : "";
         const finalAlt = caption || alt;
-        if (src) return [`![${finalAlt}](${src})`];
+        if (src) {
+          if (!__collectedImages.includes(src)) {
+            __collectedImages.push(src);
+          }
+          return [`![${finalAlt}](${src})`];
+        }
       }
       // 非图片 figure（如代码等），常规处理
       return collectChildBlocks(element, state);
@@ -1359,6 +1382,7 @@
   return {
     title,
     source: location.href,
-    markdown
+    markdown,
+    images: __collectedImages
   };
 })();

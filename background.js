@@ -5,6 +5,7 @@ const DEFAULT_OPTIONS = {
   useSelection: false,
   frontMatter: false,
   appendDate: false,
+  downloadImages: false,
   filenameTemplate: "{title}"
 };
 
@@ -148,9 +149,16 @@ async function handleAction(tab, { action, useSelection }) {
     return;
   }
 
-  const markdown = applyPostProcessing(result.markdown, options);
+  let markdown = applyPostProcessing(result.markdown, options);
 
   if (action === "save") {
+    // 如果需要下载图片，先替换 Markdown 中的图片 URL 为本地路径
+    if (options.downloadImages && result.images && result.images.length > 0) {
+      markdown = replaceImageUrls(markdown, result.images, result.title);
+    }
+    // 将远程超链接替换为本地相对路径
+    markdown = replaceHyperlinks(markdown);
+
     const filename = buildFilename(result.title, tab.url, options);
     const dataUrl = toDataUrl(markdown);
     await chrome.downloads.download({
@@ -160,6 +168,11 @@ async function handleAction(tab, { action, useSelection }) {
       conflictAction: "uniquify"
     });
     notify("已保存", filename);
+
+    // 下载图片
+    if (options.downloadImages && result.images && result.images.length > 0) {
+      await downloadAllImages(result.images, result.title);
+    }
   } else if (action === "copy") {
     await copyToTab(tab.id, markdown);
     notify("已复制", `共 ${markdown.length} 个字符`);
@@ -299,5 +312,78 @@ function notify(title, message) {
     });
   } catch {
     // notifications not available
+  }
+}
+
+function getImageExtension(url) {
+  try {
+    const pathname = new URL(url).pathname;
+    const match = pathname.match(/\.([a-z0-9]+)$/i);
+    if (match) {
+      const ext = match[1].toLowerCase();
+      if (["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "avif"].includes(ext)) {
+        return ext;
+      }
+    }
+  } catch {}
+  return "png";
+}
+
+/**
+ * 将 Markdown 中的远程图片 URL 替换为本地相对路径
+ */
+function replaceImageUrls(markdown, images, title) {
+  if (!images || images.length === 0) return markdown;
+  const baseTitle = sanitizeFilename(title || "page");
+  let result = markdown;
+  for (let i = 0; i < images.length; i++) {
+    const imageUrl = images[i];
+    const ext = getImageExtension(imageUrl);
+    const localPath = `./images/${baseTitle}_${i + 1}.${ext}`;
+    const escapedUrl = imageUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`(!\\[[^\\]]*\\])\\(${escapedUrl}\\)`, "g");
+    result = result.replace(pattern, `$1(${localPath})`);
+  }
+  return result;
+}
+
+/**
+ * 将 Markdown 中的远程超链接替换为本地相对路径
+ * [标题](https://example.com/page) → [标题](./标题)
+ */
+function replaceHyperlinks(markdown) {
+  return markdown.replace(/(?<!!)\[([^\]]+)\]\(https?:\/\/[^)]+\)/g, (match, linkText) => {
+    const cleanText = linkText.trim();
+    return `[${cleanText}](./${cleanText})`;
+  });
+}
+
+async function downloadAllImages(images, title) {
+  const baseTitle = sanitizeFilename(title || "page");
+  let successCount = 0;
+  let failCount = 0;
+
+  for (let i = 0; i < images.length; i++) {
+    const imageUrl = images[i];
+    const ext = getImageExtension(imageUrl);
+    const filename = `images/${baseTitle}_${i + 1}.${ext}`;
+
+    try {
+      await chrome.downloads.download({
+        url: imageUrl,
+        filename: filename,
+        saveAs: false,
+        conflictAction: "uniquify"
+      });
+      successCount++;
+    } catch {
+      failCount++;
+    }
+  }
+
+  if (failCount > 0) {
+    notify("图片下载", `成功 ${successCount} 张，失败 ${failCount} 张`);
+  } else if (successCount > 0) {
+    notify("图片下载", `已下载 ${successCount} 张图片`);
   }
 }
