@@ -31,6 +31,10 @@
           <span>添加 YAML Front Matter</span>
         </label>
         <label class="option">
+          <input id="includeSourceInfo" type="checkbox" checked />
+          <span>保留来源与时间</span>
+        </label>
+        <label class="option">
           <input id="appendDate" type="checkbox" />
           <span>文件名附加日期</span>
         </label>
@@ -49,7 +53,22 @@
           placeholder="{title}"
           value="{title}"
         />
-        <small>可用占位符：<code>{title}</code>、<code>{host}</code>、<code>{date}</code></small>
+        <small>可用占位符：<code>{title}</code>、<code>{host}</code>、<code>{date}</code>、<code>{seq}</code></small>
+        <div class="seq-row">
+          <label for="seqNumber">当前序号</label>
+          <input id="seqNumber" type="number" min="0" value="1" />
+        </div>
+      </section>
+
+      <section class="filename" aria-label="保存路径">
+        <label for="savePath">保存路径</label>
+        <input
+          id="savePath"
+          type="text"
+          spellcheck="false"
+          placeholder="留空则每次手动选择文件夹"
+        />
+        <small>绝对路径，如 <code>D:\notes\markdown</code> 或 <code>/Users/me/notes</code></small>
       </section>
 
       <div class="actions">

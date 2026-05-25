@@ -9,13 +9,16 @@ const includeLinks = document.querySelector("#includeLinks");
 const includeImages = document.querySelector("#includeImages");
 const useSelection = document.querySelector("#useSelection");
 const frontMatter = document.querySelector("#frontMatter");
+const includeSourceInfo = document.querySelector("#includeSourceInfo");
 const appendDate = document.querySelector("#appendDate");
 const downloadImages = document.querySelector("#downloadImages");
 const filenameTemplate = document.querySelector("#filenameTemplate");
+const seqNumber = document.querySelector("#seqNumber");
+const savePath = document.querySelector("#savePath");
 const statusNode = document.querySelector("#status");
 
 const STORAGE_KEY = "pageToMarkdownOptions";
-const OPTION_NODES = [includeLinks, includeImages, useSelection, frontMatter, appendDate, downloadImages];
+const OPTION_NODES = [includeLinks, includeImages, useSelection, frontMatter, includeSourceInfo, appendDate, downloadImages];
 
 let lastResult = null; // { title, source, markdown }
 
@@ -27,8 +30,7 @@ function sanitizeFilename(name) {
   return (
     String(name || "")
       .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "-")
-      .replace(/\s+/g, " ")
-      .trim()
+      .replace(/\s+/g, "")
       .slice(0, 120) || "page"
   );
 }
@@ -59,10 +61,17 @@ async function loadOptions() {
     if (typeof saved.includeImages === "boolean") includeImages.checked = saved.includeImages;
     if (typeof saved.useSelection === "boolean") useSelection.checked = saved.useSelection;
     if (typeof saved.frontMatter === "boolean") frontMatter.checked = saved.frontMatter;
+    if (typeof saved.includeSourceInfo === "boolean") includeSourceInfo.checked = saved.includeSourceInfo;
     if (typeof saved.appendDate === "boolean") appendDate.checked = saved.appendDate;
     if (typeof saved.downloadImages === "boolean") downloadImages.checked = saved.downloadImages;
     if (typeof saved.filenameTemplate === "string" && saved.filenameTemplate.trim()) {
       filenameTemplate.value = saved.filenameTemplate;
+    }
+    if (typeof saved.savePath === "string") {
+      savePath.value = saved.savePath;
+    }
+    if (typeof saved.seqNumber === "number") {
+      seqNumber.value = saved.seqNumber;
     }
   } catch {
     // storage unavailable, ignore
@@ -77,9 +86,12 @@ async function persistOptions() {
         includeImages: includeImages.checked,
         useSelection: useSelection.checked,
         frontMatter: frontMatter.checked,
+        includeSourceInfo: includeSourceInfo.checked,
         appendDate: appendDate.checked,
         downloadImages: downloadImages.checked,
-        filenameTemplate: filenameTemplate.value.trim() || "{title}"
+        filenameTemplate: filenameTemplate.value.trim() || "{title}",
+        seqNumber: parseInt(seqNumber.value, 10) || 1,
+        savePath: savePath.value.trim()
       }
     });
   } catch {
@@ -130,7 +142,8 @@ async function primePage() {
 function currentExtractOptions() {
   return {
     useSelection: useSelection.checked,
-    includeFrontMatter: frontMatter.checked
+    includeFrontMatter: frontMatter.checked,
+    includeSourceInfo: includeSourceInfo.checked
   };
 }
 
@@ -188,16 +201,25 @@ function applyPostProcessing(markdown) {
 function buildFilename(title, url) {
   const host = hostFromUrl(url);
   const template = (filenameTemplate.value || "{title}").trim() || "{title}";
+  const seq = parseInt(seqNumber.value, 10) || 1;
   const replaced = template
     .replace(/\{title\}/gi, title || "page")
     .replace(/\{host\}/gi, host || "page")
-    .replace(/\{date\}/gi, formatDateStamp());
+    .replace(/\{date\}/gi, formatDateStamp())
+    .replace(/\{seq\}/gi, String(seq).padStart(3, "0"));
 
   let base = sanitizeFilename(replaced);
   if (appendDate.checked && !/\{date\}/i.test(template)) {
     base = `${base}-${formatDateStamp()}`;
   }
   return `${base}.md`;
+}
+
+/** 下载成功后序号自增 */
+function incrementSeqNumber() {
+  const current = parseInt(seqNumber.value, 10) || 0;
+  seqNumber.value = current + 1;
+  persistOptions();
 }
 
 async function runExtract() {
@@ -269,6 +291,54 @@ async function previewMarkdown() {
   }
 }
 
+/**
+ * 将用户配置的绝对路径转换为相对于浏览器下载目录的相对路径
+ * 例如：
+ *   downloadsDir = "C:\\Users\\x\\Downloads"
+ *   targetAbs    = "C:\\Users\\x\\Documents\\notes"
+ *   返回 "../Documents/notes"
+ */
+function absoluteToRelativePath(targetAbs, downloadsDir) {
+  if (!targetAbs || !downloadsDir) return "";
+
+  // 统一用正斜杠并移除末尾斜杠
+  const normalize = (p) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const target = normalize(targetAbs);
+  const base = normalize(downloadsDir);
+
+  // Windows 下检查是否在同一盘符
+  const targetDrive = target.match(/^([a-zA-Z]:)/)?.[1]?.toLowerCase() || "";
+  const baseDrive = base.match(/^([a-zA-Z]:)/)?.[1]?.toLowerCase() || "";
+  if (targetDrive !== baseDrive) {
+    return null; // 不同盘符，无法计算相对路径
+  }
+
+  // 如果目标已经在下载目录下，直接返回子路径
+  if (target.toLowerCase().startsWith(base.toLowerCase() + "/")) {
+    return target.substring(base.length + 1);
+  }
+  if (target.toLowerCase() === base.toLowerCase()) {
+    return "";
+  }
+
+  // 计算需要回退的层数
+  const targetParts = target.split("/");
+  const baseParts = base.split("/");
+  let commonLen = 0;
+  for (let i = 0; i < Math.min(targetParts.length, baseParts.length); i++) {
+    if (targetParts[i].toLowerCase() === baseParts[i].toLowerCase()) {
+      commonLen = i + 1;
+    } else {
+      break;
+    }
+  }
+
+  const upCount = baseParts.length - commonLen;
+  const downParts = targetParts.slice(commonLen);
+  const relative = "../".repeat(upCount) + downParts.join("/");
+  return relative;
+}
+
 async function saveMarkdown() {
   toggleBusy(true);
   setStatus("读取页面内容中…");
@@ -281,11 +351,19 @@ async function saveMarkdown() {
     // 如果需要下载图片，先探测默认下载目录（在打开保存对话框之前）
     let downloadsDir = "";
     const shouldDownloadImages = downloadImages.checked && result.images && result.images.length > 0;
-    if (shouldDownloadImages) {
+    const configuredPath = savePath.value.trim();
+    const baseFilename = buildFilename(result.title, result.source);
+    const imageBaseName = baseFilename.replace(/\.md$/, "");
+
+    // 有预设路径或需要下载图片时都需要探测下载目录
+    if (configuredPath || shouldDownloadImages) {
       setStatus("准备中…");
       downloadsDir = await getDownloadsDirectory();
+    }
+
+    if (shouldDownloadImages) {
       // 替换 Markdown 中的远程图片 URL 为本地相对路径
-      markdown = replaceImageUrls(markdown, result.images, result.title);
+      markdown = replaceImageUrls(markdown, result.images, imageBaseName);
     }
 
     // 将远程超链接替换为本地相对路径
@@ -293,13 +371,27 @@ async function saveMarkdown() {
 
     const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
     const url = URL.createObjectURL(blob);
-    const filename = buildFilename(result.title, result.source);
 
-    setStatus("等待选择保存位置…");
+    // 计算保存路径
+    let filename = baseFilename;
+    let useSaveAs = true;
+
+    if (configuredPath) {
+      const relativePath = absoluteToRelativePath(configuredPath, downloadsDir);
+      if (relativePath === null) {
+        throw new Error(`保存路径与下载目录不在同一磁盘，无法保存。\n下载目录：${downloadsDir}`);
+      }
+      filename = relativePath
+        ? `${relativePath}/${baseFilename}`
+        : baseFilename;
+      useSaveAs = false;
+    }
+
+    setStatus(useSaveAs ? "等待选择保存位置…" : "保存中…");
     const mdDownloadId = await chrome.downloads.download({
       url,
       filename,
-      saveAs: true,
+      saveAs: useSaveAs,
       conflictAction: "uniquify"
     });
 
@@ -310,12 +402,17 @@ async function saveMarkdown() {
     // 获取 MD 文件的实际保存路径
     const [mdItem] = await chrome.downloads.search({ id: mdDownloadId });
     const mdAbsPath = mdItem?.filename || "";
-    setStatus(`已保存 ${filename}`);
+    setStatus(`已保存 ${baseFilename}`);
+
+    // 序号自增（仅当模板中使用了 {seq} 时）
+    if (/\{seq\}/i.test(filenameTemplate.value)) {
+      incrementSeqNumber();
+    }
 
     // 下载图片到同一目录下的 images/ 子文件夹
     if (shouldDownloadImages && mdAbsPath) {
       const relativeBase = getRelativeBase(mdAbsPath, downloadsDir);
-      await downloadAllImages(result.images, result.title, relativeBase);
+      await downloadAllImages(result.images, imageBaseName, relativeBase);
     }
   } catch (error) {
     setStatus(error?.message || "保存失败");
@@ -358,6 +455,10 @@ OPTION_NODES.forEach((node) => {
 
 filenameTemplate.addEventListener("change", persistOptions);
 filenameTemplate.addEventListener("blur", persistOptions);
+savePath.addEventListener("change", persistOptions);
+savePath.addEventListener("blur", persistOptions);
+seqNumber.addEventListener("change", persistOptions);
+seqNumber.addEventListener("blur", persistOptions);
 
 previewButton.addEventListener("click", previewMarkdown);
 previewClose.addEventListener("click", hidePreview);
@@ -472,16 +573,15 @@ function getImageExtension(url) {
 
 /**
  * 将 Markdown 中的远程图片 URL 替换为本地相对路径
- * ![alt](https://remote.com/img.png) → ![alt](./images/标题_1.png)
+ * ![alt](https://remote.com/img.png) → ![alt](./images/10-标题_1.png)
  */
-function replaceImageUrls(markdown, images, title) {
+function replaceImageUrls(markdown, images, imageBaseName) {
   if (!images || images.length === 0) return markdown;
-  const baseTitle = sanitizeFilename(title || "page");
   let result = markdown;
   for (let i = 0; i < images.length; i++) {
     const imageUrl = images[i];
     const ext = getImageExtension(imageUrl);
-    const localPath = `./images/${baseTitle}_${i + 1}.${ext}`;
+    const localPath = `./images/${imageBaseName}_${i + 1}.${ext}`;
     // 替换 Markdown 图片语法中的 URL（处理 URL 中可能的特殊字符）
     const escapedUrl = imageUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const pattern = new RegExp(`(!\\[[^\\]]*\\])\\(${escapedUrl}\\)`, "g");
@@ -498,7 +598,7 @@ function replaceHyperlinks(markdown) {
   // 匹配非图片的 Markdown 链接：[text](http...)
   // 使用否定前瞻确保不匹配 ![alt](url)
   return markdown.replace(/(?<!!)\[([^\]]+)\]\(https?:\/\/[^)]+\)/g, (match, linkText) => {
-    const cleanText = linkText.trim();
+    const cleanText = linkText.trim().replace(/\s+/g, "");
     return `[${cleanText}](./${cleanText})`;
   });
 }
@@ -506,18 +606,17 @@ function replaceHyperlinks(markdown) {
 /**
  * 下载所有图片到指定相对路径下的 images/ 子文件夹
  * @param {string[]} images - 图片 URL 列表
- * @param {string} title - 文档标题（用于命名）
+ * @param {string} imageBaseName - 图片基础名称（与 Markdown 文件名一致，不含扩展名）
  * @param {string} relativeBase - 相对于下载目录的子路径（如 "notes/sub"）
  */
-async function downloadAllImages(images, title, relativeBase = "") {
-  const baseTitle = sanitizeFilename(title || "page");
+async function downloadAllImages(images, imageBaseName, relativeBase = "") {
   let successCount = 0;
   let failCount = 0;
 
   for (let i = 0; i < images.length; i++) {
     const imageUrl = images[i];
     const ext = getImageExtension(imageUrl);
-    const imgName = `${baseTitle}_${i + 1}.${ext}`;
+    const imgName = `${imageBaseName}_${i + 1}.${ext}`;
     const filename = relativeBase
       ? `${relativeBase}/images/${imgName}`
       : `images/${imgName}`;

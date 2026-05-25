@@ -1278,6 +1278,8 @@
   function normalizeMarkdown(markdown) {
     return splitFenced(markdown, (part) =>
       part
+        // 移除图片前的 OCR 垃圾文本（10+连续无空格字符紧挨 ![，排除正常链接末尾的 )）
+        .replace(/[^\s)]{10,}(?=!\[[^\]]*\]\([^)]+\))/g, "")
         .replace(/^(?: {4,}|\t+)(?=\S)/gm, "")
         .replace(/([:\uff1a;\uff1b\u3002])\s*[\u2022\u25cf\u25cb\u25a0\u25aa\u25b8\u25c6]\s*/g, "$1\n- ")
         .replace(/[ \t]+[\u2022\u25cf\u25cb\u25a0\u25aa\u25b8\u25c6]\s*/g, "\n- ")
@@ -1319,6 +1321,10 @@
       if (/^```/.test(block)) return false;
       if (/^\d+\s*(\u4eba)?\u70b9\u8d5e/.test(text)) return false;
       if (/^[-*]\s*$/.test(text)) return false;
+      // 含中文标点的短文本视为正文（句号、逗号、冒号等表明是正式内容）
+      if (/[\u3002\uff01\uff1f\uff1a\uff1b\uff0c\u3001]/.test(text) && text.length >= 10) return true;
+      // 有序/无序列表项也是正文内容
+      if (/^\d+\.\s+\S/.test(text) || /^[-*+]\s+\S/.test(text)) return true;
       return text.length >= 40;
     });
 
@@ -1371,7 +1377,9 @@
 
   const header = OPTIONS.includeFrontMatter
     ? `${frontMatter}# ${escapedTitle}\n\n`
-    : [`# ${escapedTitle}`, "", `Source: ${location.href}`, `Saved: ${savedAt}`, ""].join("\n");
+    : OPTIONS.includeSourceInfo !== false
+      ? [`# ${escapedTitle}`, "", `Source: ${location.href}`, `Saved: ${savedAt}`, ""].join("\n")
+      : `# ${escapedTitle}\n\n`;
 
   const markdown = normalizeMarkdown(unwrapProseCodeBlocks(cleanMarkdown(`${header}${body}`)));
 

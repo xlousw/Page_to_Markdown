@@ -4,9 +4,12 @@ const DEFAULT_OPTIONS = {
   includeImages: true,
   useSelection: false,
   frontMatter: false,
+  includeSourceInfo: true,
   appendDate: false,
   downloadImages: false,
-  filenameTemplate: "{title}"
+  filenameTemplate: "{title}",
+  seqNumber: 1,
+  savePath: ""
 };
 
 const MENU_IDS = {
@@ -140,7 +143,8 @@ async function handleAction(tab, { action, useSelection }) {
   const options = await loadOptions();
   const extractOptions = {
     useSelection: !!useSelection || options.useSelection,
-    includeFrontMatter: options.frontMatter
+    includeFrontMatter: options.frontMatter,
+    includeSourceInfo: options.includeSourceInfo !== false
   };
 
   const result = await extractFromTab(tab.id, extractOptions);
@@ -152,14 +156,32 @@ async function handleAction(tab, { action, useSelection }) {
   let markdown = applyPostProcessing(result.markdown, options);
 
   if (action === "save") {
+    const baseFilename = buildFilename(result.title, tab.url, options);
+    const imageBaseName = baseFilename.replace(/\.md$/, "");
+
     // 如果需要下载图片，先替换 Markdown 中的图片 URL 为本地路径
     if (options.downloadImages && result.images && result.images.length > 0) {
-      markdown = replaceImageUrls(markdown, result.images, result.title);
+      markdown = replaceImageUrls(markdown, result.images, imageBaseName);
     }
     // 将远程超链接替换为本地相对路径
     markdown = replaceHyperlinks(markdown);
 
-    const filename = buildFilename(result.title, tab.url, options);
+    const configuredPath = (options.savePath || "").trim();
+
+    // 计算相对路径
+    let filename = baseFilename;
+    let imageRelativeBase = "";
+    if (configuredPath) {
+      const downloadsDir = await getDownloadsDirectory();
+      const relativePath = absoluteToRelativePath(configuredPath, downloadsDir);
+      if (relativePath === null) {
+        notify("保存失败", "保存路径与下载目录不在同一磁盘");
+        return;
+      }
+      filename = relativePath ? `${relativePath}/${baseFilename}` : baseFilename;
+      imageRelativeBase = relativePath;
+    }
+
     const dataUrl = toDataUrl(markdown);
     await chrome.downloads.download({
       url: dataUrl,
@@ -167,11 +189,16 @@ async function handleAction(tab, { action, useSelection }) {
       saveAs: false,
       conflictAction: "uniquify"
     });
-    notify("已保存", filename);
+    notify("已保存", baseFilename);
+
+    // 序号自增（仅当模板中使用了 {seq} 时）
+    if (/\{seq\}/i.test(options.filenameTemplate || "")) {
+      await incrementSeqNumber(options);
+    }
 
     // 下载图片
     if (options.downloadImages && result.images && result.images.length > 0) {
-      await downloadAllImages(result.images, result.title);
+      await downloadAllImages(result.images, imageBaseName, imageRelativeBase);
     }
   } else if (action === "copy") {
     await copyToTab(tab.id, markdown);
@@ -250,12 +277,82 @@ function applyPostProcessing(markdown, options) {
   return output;
 }
 
+/**
+ * 通过探测文件确定浏览器默认下载目录的绝对路径
+ */
+async function getDownloadsDirectory() {
+  let downloadsDir = "";
+  try {
+    const probeId = await chrome.downloads.download({
+      url: "data:text/plain;charset=utf-8,.",
+      filename: ".p2m_probe",
+      saveAs: false,
+      conflictAction: "overwrite"
+    });
+    await new Promise((resolve, reject) => {
+      const listener = (delta) => {
+        if (delta.id !== probeId) return;
+        if (delta.state?.current === "complete") {
+          chrome.downloads.onChanged.removeListener(listener);
+          resolve();
+        } else if (delta.state?.current === "interrupted") {
+          chrome.downloads.onChanged.removeListener(listener);
+          reject(new Error("probe failed"));
+        }
+      };
+      chrome.downloads.onChanged.addListener(listener);
+    });
+    const [probeItem] = await chrome.downloads.search({ id: probeId });
+    const absPath = probeItem?.filename || "";
+    const sep = absPath.includes("\\") ? "\\" : "/";
+    const lastSepIdx = absPath.lastIndexOf(sep);
+    downloadsDir = lastSepIdx > 0 ? absPath.substring(0, lastSepIdx) : "";
+    try { await chrome.downloads.removeFile(probeId); } catch {}
+    try { await chrome.downloads.erase({ id: probeId }); } catch {}
+  } catch {
+    // 探测失败
+  }
+  return downloadsDir;
+}
+
+/**
+ * 将绝对路径转换为相对于下载目录的相对路径
+ */
+function absoluteToRelativePath(targetAbs, downloadsDir) {
+  if (!targetAbs || !downloadsDir) return "";
+  const normalize = (p) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const target = normalize(targetAbs);
+  const base = normalize(downloadsDir);
+
+  const targetDrive = target.match(/^([a-zA-Z]:)/)?.[1]?.toLowerCase() || "";
+  const baseDrive = base.match(/^([a-zA-Z]:)/)?.[1]?.toLowerCase() || "";
+  if (targetDrive !== baseDrive) return null;
+
+  if (target.toLowerCase().startsWith(base.toLowerCase() + "/")) {
+    return target.substring(base.length + 1);
+  }
+  if (target.toLowerCase() === base.toLowerCase()) return "";
+
+  const targetParts = target.split("/");
+  const baseParts = base.split("/");
+  let commonLen = 0;
+  for (let i = 0; i < Math.min(targetParts.length, baseParts.length); i++) {
+    if (targetParts[i].toLowerCase() === baseParts[i].toLowerCase()) {
+      commonLen = i + 1;
+    } else {
+      break;
+    }
+  }
+  const upCount = baseParts.length - commonLen;
+  const downParts = targetParts.slice(commonLen);
+  return "../".repeat(upCount) + downParts.join("/");
+}
+
 function sanitizeFilename(name) {
   return (
     String(name || "")
       .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "-")
-      .replace(/\s+/g, " ")
-      .trim()
+      .replace(/\s+/g, "")
       .slice(0, 120) || "page"
   );
 }
@@ -278,16 +375,30 @@ function buildFilename(title, url, options) {
   }
 
   const template = options.filenameTemplate?.trim() || "{title}";
+  const seq = parseInt(options.seqNumber, 10) || 1;
   const replaced = template
     .replace(/\{title\}/gi, title || "page")
     .replace(/\{host\}/gi, host || "page")
-    .replace(/\{date\}/gi, formatDateStamp());
+    .replace(/\{date\}/gi, formatDateStamp())
+    .replace(/\{seq\}/gi, String(seq).padStart(3, "0"));
 
   let base = sanitizeFilename(replaced);
   if (options.appendDate && !/\{date\}/i.test(template)) {
     base = `${base}-${formatDateStamp()}`;
   }
   return `${base}.md`;
+}
+
+/** 下载成功后序号自增并持久化 */
+async function incrementSeqNumber(options) {
+  const current = parseInt(options.seqNumber, 10) || 0;
+  options.seqNumber = current + 1;
+  try {
+    const data = await chrome.storage.local.get(STORAGE_KEY);
+    const saved = data?.[STORAGE_KEY] || {};
+    saved.seqNumber = options.seqNumber;
+    await chrome.storage.local.set({ [STORAGE_KEY]: saved });
+  } catch {}
 }
 
 function toDataUrl(markdown) {
@@ -332,14 +443,13 @@ function getImageExtension(url) {
 /**
  * 将 Markdown 中的远程图片 URL 替换为本地相对路径
  */
-function replaceImageUrls(markdown, images, title) {
+function replaceImageUrls(markdown, images, imageBaseName) {
   if (!images || images.length === 0) return markdown;
-  const baseTitle = sanitizeFilename(title || "page");
   let result = markdown;
   for (let i = 0; i < images.length; i++) {
     const imageUrl = images[i];
     const ext = getImageExtension(imageUrl);
-    const localPath = `./images/${baseTitle}_${i + 1}.${ext}`;
+    const localPath = `./images/${imageBaseName}_${i + 1}.${ext}`;
     const escapedUrl = imageUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const pattern = new RegExp(`(!\\[[^\\]]*\\])\\(${escapedUrl}\\)`, "g");
     result = result.replace(pattern, `$1(${localPath})`);
@@ -353,20 +463,22 @@ function replaceImageUrls(markdown, images, title) {
  */
 function replaceHyperlinks(markdown) {
   return markdown.replace(/(?<!!)\[([^\]]+)\]\(https?:\/\/[^)]+\)/g, (match, linkText) => {
-    const cleanText = linkText.trim();
+    const cleanText = linkText.trim().replace(/\s+/g, "");
     return `[${cleanText}](./${cleanText})`;
   });
 }
 
-async function downloadAllImages(images, title) {
-  const baseTitle = sanitizeFilename(title || "page");
+async function downloadAllImages(images, imageBaseName, relativeBase = "") {
   let successCount = 0;
   let failCount = 0;
 
   for (let i = 0; i < images.length; i++) {
     const imageUrl = images[i];
     const ext = getImageExtension(imageUrl);
-    const filename = `images/${baseTitle}_${i + 1}.${ext}`;
+    const imgName = `${imageBaseName}_${i + 1}.${ext}`;
+    const filename = relativeBase
+      ? `${relativeBase.replace(/[\/\\]+$/, "")}/images/${imgName}`
+      : `images/${imgName}`;
 
     try {
       await chrome.downloads.download({
